@@ -16,6 +16,7 @@ use cosmic_config::{ConfigSet, CosmicConfigEntry};
 use cosmic_greeter_daemon::{BgSource, CosmicCompConfig, UserData};
 use std::{collections::HashMap, sync::Arc};
 use wayland_client::protocol::wl_output::WlOutput;
+use zbus;
 
 pub const DEFAULT_MENU_ITEM_HEIGHT: f32 = 36.;
 
@@ -140,8 +141,13 @@ impl<M: From<Message> + Send + 'static> Common<M> {
                 xkb_config.variant.push_str(&layout.variant);
             }
             if let Some(comp_config_handler) = &self.comp_config_handler {
-                match comp_config_handler.set("xkb_config", xkb_config) {
-                    Ok(()) => tracing::info!("updated cosmic-comp xkb_config"),
+                match comp_config_handler.set("xkb_config", xkb_config.clone()) {
+                    Ok(()) => {
+                        tracing::info!("updated cosmic-comp xkb_config");
+                        if let Err(err) = comp_config_handler.reload() {
+                            tracing::error!("failed to reload cosmic-comp config: {}", err);
+                        }
+                    }
                     Err(err) => tracing::error!("failed to update cosmic-comp xkb_config: {}", err),
                 }
             }
@@ -368,5 +374,38 @@ impl<M: From<Message> + Send + 'static> Common<M> {
         }
 
         Subscription::batch(subscriptions)
+    }
+}
+
+trait ConfigReload {
+    fn reload(&self) -> Result<(), String>;
+}
+
+impl ConfigReload for cosmic_config::Config {
+    fn reload(&self) -> Result<(), String> {
+        // sending a D-Bus signal to cosmic-comp to reload config
+        match zbus::blocking::Connection::session() {
+            Ok(conn) => {
+                let proxy = zbus::blocking::Proxy::new(
+                    &conn,
+                    "com.system76.CosmicComp",
+                    "/com/system76/CosmicComp",
+                    "com.system76.CosmicComp",
+                );
+                match proxy {
+                    Ok(proxy) => {
+                        match proxy.call_method("ReloadConfig", &()) {
+                            Ok(_) => {
+                                tracing::info!("Sent reload signal to cosmic-comp via D-Bus");
+                                Ok(())
+                            }
+                            Err(e) => Err(format!("Failed to call ReloadConfig: {}", e)),
+                        }
+                    }
+                    Err(e) => Err(format!("Failed to create D-Bus proxy: {}", e)),
+                }
+            }
+            Err(e) => Err(format!("Failed to connect to D-Bus session: {}", e)),
+        }
     }
 }
